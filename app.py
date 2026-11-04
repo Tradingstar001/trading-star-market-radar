@@ -3,340 +3,609 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import yfinance as yf
+
+from datetime import datetime
+
+# =========================================
+# TRADING STAR GOLD LIVE RADAR V2.0
+# =========================================
 
 st.set_page_config(
-    page_title="Trading Star Market Radar",
+    page_title="Trading Star Gold Live Radar",
     page_icon="📡",
     layout="wide"
 )
 
-st.title("📡 Trading Star Market Radar")
-st.caption("Historical Wave Intelligence | Research V1.3")
-st.divider()
+st.title("📡 TRADING STAR")
+st.subheader("GOLD LIVE WAVE RADAR")
+st.caption("Live data prototype | Multi-Timeframe Research Engine")
 
+# =========================================
+# DATA DOWNLOAD
+# =========================================
 
-def normalize_columns(df):
-    df.columns = [
-        str(c).strip().lower().replace(" ", "_")
-        for c in df.columns
-    ]
+@st.cache_data(ttl=45, show_spinner=False)
+def download_gold_data():
 
-    aliases = {
-        "date": ["date", "datetime", "timestamp", "time"],
-        "open": ["open", "o"],
-        "high": ["high", "h"],
-        "low": ["low", "l"],
-        "close": ["close", "c", "adj_close"],
-        "volume": ["volume", "vol", "tick_volume"]
-    }
+    ticker = yf.Ticker("GC=F")
 
-    rename = {}
-    for standard, names in aliases.items():
-        for name in names:
-            if name in df.columns:
-                rename[name] = standard
-                break
+    df = ticker.history(
+        period="5d",
+        interval="15m",
+        auto_adjust=False
+    )
 
-    df = df.rename(columns=rename)
+    if df is None or df.empty:
+        raise ValueError("Yahoo Finance returned no Gold data.")
 
-    required = ["date", "open", "high", "low", "close"]
-    missing = [c for c in required if c not in df.columns]
+    df = df.reset_index()
 
-    if missing:
-        raise ValueError("Missing columns: " + ", ".join(missing))
+    if "Datetime" in df.columns:
+        df = df.rename(columns={"Datetime": "Date"})
+    elif "Date" not in df.columns:
+        raise ValueError("Date column not available.")
+
+    df = df.rename(columns={
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume"
+    })
+
+    required = ["Date", "open", "high", "low", "close"]
+
+    if not all(c in df.columns for c in required):
+        raise ValueError("Required OHLC columns missing.")
+
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if "volume" not in df.columns:
         df["volume"] = 0
 
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["volume"] = pd.to_numeric(
+        df["volume"], errors="coerce"
+    ).fillna(0)
 
     df = df.dropna(subset=required)
-    df = df.sort_values("date")
-    df = df.drop_duplicates(subset=["date"], keep="last")
-    df = df.reset_index(drop=True)
+    df = df.sort_values("Date")
+    df = df.drop_duplicates("Date")
+    df = df.set_index("Date")
 
-    if len(df) < 20:
-        raise ValueError("At least 20 valid candles are required.")
+    # Exclude incomplete 15-minute candle
+    if df.index.tz is not None:
+        now = pd.Timestamp.now(tz=df.index.tz)
+    else:
+        now = pd.Timestamp.now()
 
-    invalid = (
-        (df["high"] < df["low"]) |
-        (df["high"] < df["open"]) |
-        (df["high"] < df["close"]) |
-        (df["low"] > df["open"]) |
-        (df["low"] > df["close"])
-    )
+    df = df[
+        df.index + pd.Timedelta(minutes=15) <= now
+    ]
 
-    if invalid.any():
-        raise ValueError("Invalid OHLC candle data detected.")
+    if len(df) < 60:
+        raise ValueError(
+            "Not enough completed Gold candles. "
+            "Try again when market data is available."
+        )
 
     return df
 
 
-def calculate_atr(df, period=14):
-    prev = df["close"].shift(1)
+# =========================================
+# TIMEFRAME CONVERSION
+# =========================================
 
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev).abs(),
-        (df["low"] - prev).abs()
-    ], axis=1).max(axis=1)
+def make_timeframe(df, rule):
 
-    return tr.rolling(period, min_periods=period).mean()
+    if rule == "15min":
+        result = df.copy()
+    else:
+        result = df.resample(
+            rule,
+            label="right",
+            closed="right"
+        ).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        })
 
+    result = result.dropna(
+        subset=["open", "high", "low", "close"]
+    )
+
+    # Remove current incomplete timeframe candle
+    if result.index.tz is not None:
+        now = pd.Timestamp.now(tz=result.index.tz)
+    else:
+        now = pd.Timestamp.now()
+
+    minutes = {
+        "15min": 15,
+        "30min": 30,
+        "1h": 60
+    }[rule]
+
+    result = result[
+        result.index + pd.Timedelta(minutes=minutes) <= now
+    ]
+
+    return result
+
+
+# =========================================
+# INDICATORS
+# =========================================
+
+def add_indicators(df):
+
+    df = df.copy()
+
+    df["EMA20"] = df["close"].ewm(
+        span=20, adjust=False
+    ).mean()
+
+    df["EMA50"] = df["close"].ewm(
+        span=50, adjust=False
+    ).mean()
+
+    delta = df["close"].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1/14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1/14,
+        min_periods=14,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    df["RSI"] = df["RSI"].fillna(50)
+
+    ema12 = df["close"].ewm(
+        span=12, adjust=False
+    ).mean()
+
+    ema26 = df["close"].ewm(
+        span=26, adjust=False
+    ).mean()
+
+    macd = ema12 - ema26
+
+    signal = macd.ewm(
+        span=9, adjust=False
+    ).mean()
+
+    df["MACD_HIST"] = macd - signal
+
+    return df
+
+
+# =========================================
+# CONFIRMED SWING DETECTION
+# =========================================
 
 def detect_swings(df, left=3, right=3):
+
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
-    candidates = []
+
+    points = []
 
     for i in range(left, len(df) - right):
-        hw = highs[i-left:i+right+1]
-        lw = lows[i-left:i+right+1]
 
-        if highs[i] == np.max(hw) and np.sum(hw == highs[i]) == 1:
-            candidates.append({
+        high_window = highs[i-left:i+right+1]
+        low_window = lows[i-left:i+right+1]
+
+        if (
+            highs[i] == np.max(high_window)
+            and np.sum(high_window == highs[i]) == 1
+        ):
+            points.append({
                 "index": i,
                 "type": "HIGH",
                 "price": float(highs[i])
             })
 
-        if lows[i] == np.min(lw) and np.sum(lw == lows[i]) == 1:
-            candidates.append({
+        if (
+            lows[i] == np.min(low_window)
+            and np.sum(low_window == lows[i]) == 1
+        ):
+            points.append({
                 "index": i,
                 "type": "LOW",
                 "price": float(lows[i])
             })
 
-    candidates.sort(key=lambda x: x["index"])
+    points.sort(key=lambda p: p["index"])
+
     swings = []
 
-    for p in candidates:
+    for p in points:
+
         if not swings:
             swings.append(p)
             continue
 
-        prev = swings[-1]
+        previous = swings[-1]
 
-        if p["type"] != prev["type"]:
+        if p["type"] != previous["type"]:
             swings.append(p)
-        elif p["type"] == "HIGH" and p["price"] > prev["price"]:
-            swings[-1] = p
-        elif p["type"] == "LOW" and p["price"] < prev["price"]:
-            swings[-1] = p
 
-    return swings
+        elif p["type"] == "HIGH":
+            if p["price"] > previous["price"]:
+                swings[-1] = p
 
+        elif p["type"] == "LOW":
+            if p["price"] < previous["price"]:
+                swings[-1] = p
 
-def classify_swings(swings):
-    prev_high = None
-    prev_low = None
+    previous_high = None
+    previous_low = None
 
     for p in swings:
+
         if p["type"] == "HIGH":
-            if prev_high is None:
+
+            if previous_high is None:
                 p["structure"] = "INITIAL HIGH"
-            elif p["price"] > prev_high:
+            elif p["price"] > previous_high:
                 p["structure"] = "HH"
             else:
                 p["structure"] = "LH"
-            prev_high = p["price"]
+
+            previous_high = p["price"]
+
         else:
-            if prev_low is None:
+
+            if previous_low is None:
                 p["structure"] = "INITIAL LOW"
-            elif p["price"] > prev_low:
+            elif p["price"] > previous_low:
                 p["structure"] = "HL"
             else:
                 p["structure"] = "LL"
-            prev_low = p["price"]
+
+            previous_low = p["price"]
 
     return swings
 
 
-# SIDEBAR
-st.sidebar.header("Market Settings")
+# =========================================
+# DIRECTIONAL ANALYSIS
+# =========================================
 
-market = st.sidebar.selectbox(
-    "Select Market",
-    ["XAUUSD", "NIFTY 50", "BANK NIFTY", "NSE STOCK", "FOREX"]
-)
+def analyze_timeframe(df):
 
-timeframe = st.sidebar.selectbox(
-    "Select Timeframe",
-    ["1H", "30M", "15M"]
-)
+    df = add_indicators(df)
 
-uploaded_file = st.file_uploader(
-    "Upload Historical OHLCV CSV",
-    type=["csv"]
-)
+    if len(df) < 55:
+        raise ValueError("Not enough candles for analysis.")
 
-if uploaded_file is None:
-    st.info("Upload a CSV file to begin historical wave analysis.")
-    st.markdown("Required columns: Date, Open, High, Low, Close, Volume")
-    st.code(
-        "Date,Open,High,Low,Close,Volume\n"
-        "2026-01-01,100,105,98,103,15000\n"
-        "2026-01-02,103,108,101,106,18000"
-    )
+    last = df.iloc[-1]
 
-else:
-    try:
-        data = pd.read_csv(uploaded_file)
-        data = normalize_columns(data)
-        data["ATR"] = calculate_atr(data)
+    score = 0
 
-        st.success("Historical data loaded and validated.")
+    # Trend
+    if last["EMA20"] > last["EMA50"]:
+        score += 2
+    elif last["EMA20"] < last["EMA50"]:
+        score -= 2
 
-        st.subheader("Market Overview")
+    # RSI momentum
+    if last["RSI"] > 55:
+        score += 1
+    elif last["RSI"] < 45:
+        score -= 1
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Market", market)
-        c2.metric("Timeframe", timeframe)
-        c3.metric("Total Candles", len(data))
-        c4.metric("Latest Close", f"{data['close'].iloc[-1]:.4f}")
+    # MACD momentum
+    if last["MACD_HIST"] > 0:
+        score += 1
+    elif last["MACD_HIST"] < 0:
+        score -= 1
 
-        # PRICE CHART
-        st.subheader("Historical Price Chart")
+    # Confirmed swing structure
+    swings = detect_swings(df)
 
-        price_fig = go.Figure()
-        price_fig.add_trace(go.Candlestick(
-            x=data["date"],
-            open=data["open"],
-            high=data["high"],
-            low=data["low"],
-            close=data["close"],
-            name="Price"
+    recent = [
+        p["structure"] for p in swings[-6:]
+    ]
+
+    if "HH" in recent and "HL" in recent:
+        score += 2
+        structure = "BULLISH STRUCTURE"
+
+    elif "LH" in recent and "LL" in recent:
+        score -= 2
+        structure = "BEARISH STRUCTURE"
+
+    else:
+        structure = "MIXED STRUCTURE"
+
+    alignment = round((score / 6) * 100)
+
+    if alignment >= 30:
+        direction = "BULLISH"
+
+    elif alignment <= -30:
+        direction = "BEARISH"
+
+    else:
+        direction = "NEUTRAL"
+
+    if abs(alignment) >= 65:
+        strength = "STRONG"
+
+    elif abs(alignment) >= 30:
+        strength = "MODERATE"
+
+    else:
+        strength = "WEAK"
+
+    return {
+        "data": df,
+        "swings": swings,
+        "direction": direction,
+        "alignment": alignment,
+        "strength": strength,
+        "structure": structure,
+        "rsi": round(float(last["RSI"]), 2),
+        "ema20": float(last["EMA20"]),
+        "ema50": float(last["EMA50"]),
+        "price": float(last["close"]),
+        "last_time": df.index[-1]
+    }
+
+
+# =========================================
+# CHART
+# =========================================
+
+def draw_chart(result, title):
+
+    df = result["data"].tail(120)
+    swings = result["swings"]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        name="Gold"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["EMA20"],
+        mode="lines",
+        name="EMA 20"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["EMA50"],
+        mode="lines",
+        name="EMA 50"
+    ))
+
+    visible_swings = [
+        p for p in swings
+        if p["index"] >= len(result["data"]) - 120
+    ]
+
+    if visible_swings:
+
+        fig.add_trace(go.Scatter(
+            x=[
+                result["data"].index[p["index"]]
+                for p in visible_swings
+            ],
+            y=[p["price"] for p in visible_swings],
+            mode="lines+markers+text",
+            text=[p["structure"] for p in visible_swings],
+            textposition="top center",
+            name="Confirmed Swings"
         ))
 
-        price_fig.update_layout(
-            template="plotly_dark",
-            height=480,
-            xaxis_rangeslider_visible=False
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        height=450,
+        xaxis_rangeslider_visible=False
+    )
+
+    return fig
+
+
+# =========================================
+# LIVE RADAR
+# =========================================
+
+@st.fragment(run_every="60s")
+def live_radar():
+
+    st.caption(
+        "Data source: Yahoo Finance | GC=F Gold Futures"
+    )
+
+    try:
+
+        base = download_gold_data()
+
+        data_15 = make_timeframe(base, "15min")
+        data_30 = make_timeframe(base, "30min")
+        data_60 = make_timeframe(base, "1h")
+
+        results = {
+            "15M": analyze_timeframe(data_15),
+            "30M": analyze_timeframe(data_30),
+            "1H": analyze_timeframe(data_60)
+        }
+
+        # OVERALL RADAR
+        scores = [
+            results[tf]["alignment"]
+            for tf in ["15M", "30M", "1H"]
+        ]
+
+        overall = round(sum(scores) / len(scores))
+
+        directions = [
+            results[tf]["direction"]
+            for tf in ["15M", "30M", "1H"]
+        ]
+
+        if all(d == "BULLISH" for d in directions):
+            overall_direction = "BULLISH"
+
+        elif all(d == "BEARISH" for d in directions):
+            overall_direction = "BEARISH"
+
+        else:
+            overall_direction = "MIXED / NEUTRAL"
+
+        st.success(
+            "Gold market data loaded successfully."
         )
 
-        st.plotly_chart(price_fig, use_container_width=True)
+        latest = results["15M"]["price"]
 
-        # WAVE ANALYSIS
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Gold Futures Price",
+            f"${latest:,.2f}"
+        )
+
+        c2.metric(
+            "Overall Direction",
+            overall_direction
+        )
+
+        c3.metric(
+            "Directional Alignment",
+            f"{overall:+d} / 100"
+        )
+
+        st.caption(
+            "Latest completed 15-minute candle: "
+            + str(results["15M"]["last_time"])
+        )
+
+        # ALERTS
         st.divider()
-        st.subheader("Advanced Wave Structure Intelligence")
+        st.subheader("Market Radar Alerts")
 
-        swings = classify_swings(detect_swings(data))
-
-        if len(swings) >= 2:
-            wave_rows = []
-
-            for j in range(1, len(swings)):
-                a = swings[j - 1]
-                b = swings[j]
-
-                diff = b["price"] - a["price"]
-                duration = b["index"] - a["index"]
-                atr = data["ATR"].iloc[b["index"]]
-
-                atr_multiple = (
-                    abs(diff) / atr
-                    if pd.notna(atr) and atr > 0
-                    else np.nan
-                )
-
-                wave_rows.append({
-                    "Wave": j,
-                    "Direction": "BULLISH" if diff > 0 else "BEARISH",
-                    "Structure": a["structure"] + " → " + b["structure"],
-                    "Start Price": round(a["price"], 5),
-                    "End Price": round(b["price"], 5),
-                    "Movement": round(abs(diff), 5),
-                    "Movement %": round(abs(diff) / a["price"] * 100, 3),
-                    "Duration": duration,
-                    "Velocity": round(abs(diff) / duration, 5),
-                    "ATR Multiple": (
-                        round(atr_multiple, 2)
-                        if pd.notna(atr_multiple)
-                        else None
-                    )
-                })
-
-            waves = pd.DataFrame(wave_rows)
-
-            bullish = int((waves["Direction"] == "BULLISH").sum())
-            bearish = int((waves["Direction"] == "BEARISH").sum())
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Total Waves", len(waves))
-            m2.metric("Bullish Waves", bullish)
-            m3.metric("Bearish Waves", bearish)
-
-            # STATIC TABLES - avoids interactive DataFrame component
-            st.subheader("Swing Structure")
-
-            structure_data = pd.DataFrame([
-                {
-                    "Time": data["date"].iloc[p["index"]],
-                    "Swing Type": p["type"],
-                    "Price": round(p["price"], 5),
-                    "Classification": p["structure"]
-                }
-                for p in swings
-            ])
-
-            st.table(structure_data.tail(30))
-
-            st.subheader("Wave Performance Table")
-            st.table(waves.tail(30))
-
-            # ECG WAVE MONITOR
-            st.subheader("Market ECG Wave Monitor")
-
-            wave_fig = go.Figure()
-            wave_fig.add_trace(go.Scatter(
-                x=[data["date"].iloc[p["index"]] for p in swings],
-                y=[p["price"] for p in swings],
-                mode="lines+markers+text",
-                text=[p["structure"] for p in swings],
-                textposition="top center",
-                line=dict(color="#00E5A8", width=2),
-                marker=dict(size=8),
-                name="Confirmed Swings"
-            ))
-
-            wave_fig.update_layout(
-                template="plotly_dark",
-                height=430,
-                xaxis_title="Date",
-                yaxis_title="Price"
+        if (
+            overall_direction == "BULLISH"
+            and overall >= 50
+        ):
+            st.success(
+                "BULLISH ALIGNMENT WATCH: "
+                "1H, 30M and 15M are aligned bullish."
             )
 
-            st.plotly_chart(wave_fig, use_container_width=True)
-
-            # STRUCTURE OBSERVATION
-            st.subheader("Market Structure Observation")
-
-            recent = [p["structure"] for p in swings[-6:]]
-
-            if "HH" in recent and "HL" in recent:
-                st.success("Higher High and Higher Low structures detected. Bullish structure is present in recent confirmed swings.")
-            elif "LH" in recent and "LL" in recent:
-                st.warning("Lower High and Lower Low structures detected. Bearish structure is present in recent confirmed swings.")
-            else:
-                st.info("Mixed or developing structure. Wait for additional confirmed swings.")
-
-            st.caption(
-                "Historical structure observation only. "
-                "Not a trading signal or a forecast."
+        elif (
+            overall_direction == "BEARISH"
+            and overall <= -50
+        ):
+            st.warning(
+                "BEARISH ALIGNMENT WATCH: "
+                "1H, 30M and 15M are aligned bearish."
             )
 
         else:
-            st.warning("Insufficient confirmed swings. Upload more historical candles.")
+            st.info(
+                "NO FULL ALIGNMENT: "
+                "Timeframes are mixed. Wait for confirmation."
+            )
 
-        with st.expander("View Uploaded Historical Data"):
-            st.table(data.tail(20))
+        st.caption(
+            "Alerts are research observations, not entry signals."
+        )
+
+        # TIMEFRAME SUMMARY
+        st.divider()
+        st.subheader("Multi-Timeframe Intelligence")
+
+        summary = []
+
+        for tf in ["1H", "30M", "15M"]:
+
+            r = results[tf]
+
+            summary.append({
+                "Timeframe": tf,
+                "Direction": r["direction"],
+                "Alignment Score": r["alignment"],
+                "Strength": r["strength"],
+                "Structure": r["structure"],
+                "RSI": r["rsi"],
+                "Price": round(r["price"], 2)
+            })
+
+        st.table(pd.DataFrame(summary))
+
+        # CHARTS
+        st.divider()
+        st.subheader("Live Gold Wave Charts")
+
+        for tf in ["1H", "30M", "15M"]:
+
+            r = results[tf]
+
+            st.markdown(f"### {tf} Wave Analysis")
+
+            st.write(
+                f"Direction: {r['direction']} | "
+                f"Strength: {r['strength']} | "
+                f"Structure: {r['structure']}"
+            )
+
+            st.plotly_chart(
+                draw_chart(r, f"Gold {tf}"),
+                use_container_width=True
+            )
+
+        st.caption(
+            "Radar refreshes every 60 seconds while this app session is active."
+        )
 
     except Exception as e:
-        st.error(f"Market Radar Error: {e}")
-        st.info("Please check the CSV columns and data format.")
+
+        st.error(
+            f"Live Gold Data Error: {e}"
+        )
+
+        st.info(
+            "Yahoo Finance data may be unavailable, "
+            "delayed or temporarily rate-limited. "
+            "Try refreshing later."
+        )
+
+
+live_radar()
 
 st.divider()
-st.caption("TRADING STAR | MARKET RADAR | RESEARCH V1.3")
+
+st.caption(
+    "TRADING STAR | GOLD LIVE WAVE RADAR | V2.0"
+)
