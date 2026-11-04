@@ -4,11 +4,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# -----------------------------------------
-# TRADING STAR MARKET RADAR
-# VERSION 1.2
-# -----------------------------------------
-
 st.set_page_config(
     page_title="Trading Star Market Radar",
     page_icon="📡",
@@ -16,20 +11,14 @@ st.set_page_config(
 )
 
 st.title("📡 Trading Star Market Radar")
-st.caption("Historical Wave Intelligence | Research Dashboard")
-
+st.caption("Historical Wave Intelligence | Research V1.3")
 st.divider()
 
 
-# -----------------------------------------
-# DATA PROCESSING
-# -----------------------------------------
-
 def normalize_columns(df):
-
     df.columns = [
-        str(col).strip().lower().replace(" ", "_")
-        for col in df.columns
+        str(c).strip().lower().replace(" ", "_")
+        for c in df.columns
     ]
 
     aliases = {
@@ -41,66 +30,36 @@ def normalize_columns(df):
         "volume": ["volume", "vol", "tick_volume"]
     }
 
-    rename_map = {}
-
-    for standard, possible_names in aliases.items():
-        for name in possible_names:
+    rename = {}
+    for standard, names in aliases.items():
+        for name in names:
             if name in df.columns:
-                rename_map[name] = standard
+                rename[name] = standard
                 break
 
-    df = df.rename(columns=rename_map)
+    df = df.rename(columns=rename)
 
     required = ["date", "open", "high", "low", "close"]
-
-    missing = [
-        col for col in required
-        if col not in df.columns
-    ]
+    missing = [c for c in required if c not in df.columns]
 
     if missing:
-        raise ValueError(
-            "Missing required columns: "
-            + ", ".join(missing)
-        )
+        raise ValueError("Missing columns: " + ", ".join(missing))
 
     if "volume" not in df.columns:
         df["volume"] = 0
 
-    df["date"] = pd.to_datetime(
-        df["date"],
-        errors="coerce"
-    )
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    numeric_columns = [
-        "open", "high", "low", "close", "volume"
-    ]
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
-
-    df = df.dropna(
-        subset=[
-            "date", "open", "high",
-            "low", "close"
-        ]
-    )
-
+    df = df.dropna(subset=required)
     df = df.sort_values("date")
-    df = df.drop_duplicates(
-        subset=["date"],
-        keep="last"
-    )
-
+    df = df.drop_duplicates(subset=["date"], keep="last")
     df = df.reset_index(drop=True)
 
     if len(df) < 20:
-        raise ValueError(
-            "At least 20 valid candles are required."
-        )
+        raise ValueError("At least 20 valid candles are required.")
 
     invalid = (
         (df["high"] < df["low"]) |
@@ -111,178 +70,97 @@ def normalize_columns(df):
     )
 
     if invalid.any():
-        raise ValueError(
-            "Invalid OHLC candle data detected. "
-            "Please check your CSV file."
-        )
+        raise ValueError("Invalid OHLC candle data detected.")
 
     return df
 
 
-# -----------------------------------------
-# ATR CALCULATION
-# -----------------------------------------
-
 def calculate_atr(df, period=14):
+    prev = df["close"].shift(1)
 
-    previous_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev).abs(),
+        (df["low"] - prev).abs()
+    ], axis=1).max(axis=1)
 
-    tr1 = df["high"] - df["low"]
+    return tr.rolling(period, min_periods=period).mean()
 
-    tr2 = (
-        df["high"] - previous_close
-    ).abs()
-
-    tr3 = (
-        df["low"] - previous_close
-    ).abs()
-
-    true_range = pd.concat(
-        [tr1, tr2, tr3],
-        axis=1
-    ).max(axis=1)
-
-    return true_range.rolling(
-        period,
-        min_periods=period
-    ).mean()
-
-
-# -----------------------------------------
-# CONFIRMED PIVOT DETECTOR
-# -----------------------------------------
 
 def detect_swings(df, left=3, right=3):
-
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
-
     candidates = []
 
     for i in range(left, len(df) - right):
+        hw = highs[i-left:i+right+1]
+        lw = lows[i-left:i+right+1]
 
-        high_window = highs[
-            i-left:i+right+1
-        ]
-
-        low_window = lows[
-            i-left:i+right+1
-        ]
-
-        current_high = highs[i]
-        current_low = lows[i]
-
-        # Unique confirmed pivot high
-        if (
-            current_high == np.max(high_window)
-            and np.sum(high_window == current_high) == 1
-        ):
+        if highs[i] == np.max(hw) and np.sum(hw == highs[i]) == 1:
             candidates.append({
                 "index": i,
                 "type": "HIGH",
-                "price": float(current_high)
+                "price": float(highs[i])
             })
 
-        # Unique confirmed pivot low
-        if (
-            current_low == np.min(low_window)
-            and np.sum(low_window == current_low) == 1
-        ):
+        if lows[i] == np.min(lw) and np.sum(lw == lows[i]) == 1:
             candidates.append({
                 "index": i,
                 "type": "LOW",
-                "price": float(current_low)
+                "price": float(lows[i])
             })
 
-    candidates.sort(
-        key=lambda x: x["index"]
-    )
-
-    # Keep alternating swing types.
-    # If two same-type pivots occur consecutively,
-    # retain only the more extreme one.
-
+    candidates.sort(key=lambda x: x["index"])
     swings = []
 
-    for point in candidates:
-
+    for p in candidates:
         if not swings:
-            swings.append(point)
+            swings.append(p)
             continue
 
-        previous = swings[-1]
+        prev = swings[-1]
 
-        if point["type"] != previous["type"]:
-            swings.append(point)
-
-        else:
-
-            if point["type"] == "HIGH":
-                if point["price"] > previous["price"]:
-                    swings[-1] = point
-
-            elif point["type"] == "LOW":
-                if point["price"] < previous["price"]:
-                    swings[-1] = point
+        if p["type"] != prev["type"]:
+            swings.append(p)
+        elif p["type"] == "HIGH" and p["price"] > prev["price"]:
+            swings[-1] = p
+        elif p["type"] == "LOW" and p["price"] < prev["price"]:
+            swings[-1] = p
 
     return swings
 
-
-# -----------------------------------------
-# SWING STRUCTURE CLASSIFICATION
-# -----------------------------------------
 
 def classify_swings(swings):
+    prev_high = None
+    prev_low = None
 
-    previous_high = None
-    previous_low = None
-
-    for point in swings:
-
-        if point["type"] == "HIGH":
-
-            if previous_high is None:
-                point["structure"] = "INITIAL HIGH"
-
-            elif point["price"] > previous_high:
-                point["structure"] = "HH"
-
+    for p in swings:
+        if p["type"] == "HIGH":
+            if prev_high is None:
+                p["structure"] = "INITIAL HIGH"
+            elif p["price"] > prev_high:
+                p["structure"] = "HH"
             else:
-                point["structure"] = "LH"
-
-            previous_high = point["price"]
-
+                p["structure"] = "LH"
+            prev_high = p["price"]
         else:
-
-            if previous_low is None:
-                point["structure"] = "INITIAL LOW"
-
-            elif point["price"] > previous_low:
-                point["structure"] = "HL"
-
+            if prev_low is None:
+                p["structure"] = "INITIAL LOW"
+            elif p["price"] > prev_low:
+                p["structure"] = "HL"
             else:
-                point["structure"] = "LL"
-
-            previous_low = point["price"]
+                p["structure"] = "LL"
+            prev_low = p["price"]
 
     return swings
 
 
-# -----------------------------------------
 # SIDEBAR
-# -----------------------------------------
-
 st.sidebar.header("Market Settings")
 
 market = st.sidebar.selectbox(
     "Select Market",
-    [
-        "XAUUSD",
-        "NIFTY 50",
-        "BANK NIFTY",
-        "NSE STOCK",
-        "FOREX"
-    ]
+    ["XAUUSD", "NIFTY 50", "BANK NIFTY", "NSE STOCK", "FOREX"]
 )
 
 timeframe = st.sidebar.selectbox(
@@ -290,32 +168,14 @@ timeframe = st.sidebar.selectbox(
     ["1H", "30M", "15M"]
 )
 
-st.sidebar.caption(
-    "Upload historical OHLCV CSV data for research."
-)
-
-
-# -----------------------------------------
-# CSV UPLOAD
-# -----------------------------------------
-
-st.subheader("Historical Market Data")
-
 uploaded_file = st.file_uploader(
-    "Upload OHLCV CSV File",
+    "Upload Historical OHLCV CSV",
     type=["csv"]
 )
 
-
 if uploaded_file is None:
-
-    st.info(
-        "Please upload a CSV file containing "
-        "Date, Open, High, Low and Close columns."
-    )
-
-    st.markdown("### Required CSV Format")
-
+    st.info("Upload a CSV file to begin historical wave analysis.")
+    st.markdown("Required columns: Date, Open, High, Low, Close, Volume")
     st.code(
         "Date,Open,High,Low,Close,Volume\n"
         "2026-01-01,100,105,98,103,15000\n"
@@ -323,191 +183,75 @@ if uploaded_file is None:
     )
 
 else:
-
     try:
-
-        # ---------------------------------
-        # LOAD AND VALIDATE DATA
-        # ---------------------------------
-
-        raw_data = pd.read_csv(uploaded_file)
-
-        data = normalize_columns(raw_data)
-
+        data = pd.read_csv(uploaded_file)
+        data = normalize_columns(data)
         data["ATR"] = calculate_atr(data)
 
-        st.success(
-            "Historical data successfully loaded "
-            "and validated."
-        )
-
-        st.divider()
-
-        # ---------------------------------
-        # MARKET SUMMARY
-        # ---------------------------------
+        st.success("Historical data loaded and validated.")
 
         st.subheader("Market Overview")
 
-        col1, col2, col3, col4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Market", market)
+        c2.metric("Timeframe", timeframe)
+        c3.metric("Total Candles", len(data))
+        c4.metric("Latest Close", f"{data['close'].iloc[-1]:.4f}")
 
-        col1.metric(
-            "Market",
-            market
-        )
-
-        col2.metric(
-            "Timeframe",
-            timeframe
-        )
-
-        col3.metric(
-            "Total Candles",
-            len(data)
-        )
-
-        col4.metric(
-            "Latest Close",
-            f"{data['close'].iloc[-1]:.4f}"
-        )
-
-        # ---------------------------------
-        # CANDLESTICK CHART
-        # ---------------------------------
-
+        # PRICE CHART
         st.subheader("Historical Price Chart")
 
-        candle_fig = go.Figure()
+        price_fig = go.Figure()
+        price_fig.add_trace(go.Candlestick(
+            x=data["date"],
+            open=data["open"],
+            high=data["high"],
+            low=data["low"],
+            close=data["close"],
+            name="Price"
+        ))
 
-        candle_fig.add_trace(
-            go.Candlestick(
-                x=data["date"],
-                open=data["open"],
-                high=data["high"],
-                low=data["low"],
-                close=data["close"],
-                name="Price"
-            )
-        )
-
-        candle_fig.update_layout(
+        price_fig.update_layout(
             template="plotly_dark",
-            height=500,
-            xaxis_title="Date",
-            yaxis_title="Price",
+            height=480,
             xaxis_rangeslider_visible=False
         )
 
-        st.plotly_chart(
-            candle_fig,
-            use_container_width=True
-        )
+        st.plotly_chart(price_fig, use_container_width=True)
 
-        # ---------------------------------
-        # WAVE DETECTION
-        # ---------------------------------
-
+        # WAVE ANALYSIS
         st.divider()
+        st.subheader("Advanced Wave Structure Intelligence")
 
-        st.subheader(
-            "Advanced Wave Structure Intelligence"
-        )
-
-        swings = detect_swings(
-            data,
-            left=3,
-            right=3
-        )
-
-        swings = classify_swings(swings)
+        swings = classify_swings(detect_swings(data))
 
         if len(swings) >= 2:
-
-            # ---------------------------------
-            # WAVE PERFORMANCE
-            # ---------------------------------
-
             wave_rows = []
 
             for j in range(1, len(swings)):
-
                 a = swings[j - 1]
                 b = swings[j]
 
-                difference = (
-                    b["price"] - a["price"]
-                )
+                diff = b["price"] - a["price"]
+                duration = b["index"] - a["index"]
+                atr = data["ATR"].iloc[b["index"]]
 
-                duration = (
-                    b["index"] - a["index"]
-                )
-
-                atr_value = data["ATR"].iloc[
-                    b["index"]
-                ]
-
-                if (
-                    pd.notna(atr_value)
-                    and atr_value > 0
-                ):
-                    atr_multiple = (
-                        abs(difference) / atr_value
-                    )
-                else:
-                    atr_multiple = np.nan
-
-                velocity = (
-                    abs(difference) / duration
-                    if duration > 0
-                    else np.nan
-                )
-
-                movement_percent = (
-                    abs(difference) / a["price"] * 100
-                    if a["price"] != 0
+                atr_multiple = (
+                    abs(diff) / atr
+                    if pd.notna(atr) and atr > 0
                     else np.nan
                 )
 
                 wave_rows.append({
-
                     "Wave": j,
-
-                    "Direction": (
-                        "BULLISH"
-                        if difference > 0
-                        else "BEARISH"
-                    ),
-
-                    "Structure": (
-                        a["structure"]
-                        + " → "
-                        + b["structure"]
-                    ),
-
-                    "Start Price": round(
-                        a["price"], 5
-                    ),
-
-                    "End Price": round(
-                        b["price"], 5
-                    ),
-
-                    "Movement": round(
-                        abs(difference), 5
-                    ),
-
-                    "Movement %": round(
-                        movement_percent, 3
-                    ),
-
+                    "Direction": "BULLISH" if diff > 0 else "BEARISH",
+                    "Structure": a["structure"] + " → " + b["structure"],
+                    "Start Price": round(a["price"], 5),
+                    "End Price": round(b["price"], 5),
+                    "Movement": round(abs(diff), 5),
+                    "Movement %": round(abs(diff) / a["price"] * 100, 3),
                     "Duration": duration,
-
-                    "Velocity": (
-                        round(velocity, 5)
-                        if pd.notna(velocity)
-                        else None
-                    ),
-
+                    "Velocity": round(abs(diff) / duration, 5),
                     "ATR Multiple": (
                         round(atr_multiple, 2)
                         if pd.notna(atr_multiple)
@@ -517,219 +261,82 @@ else:
 
             waves = pd.DataFrame(wave_rows)
 
-            bullish_count = int(
-                (waves["Direction"] == "BULLISH").sum()
-            )
-
-            bearish_count = int(
-                (waves["Direction"] == "BEARISH").sum()
-            )
-
-            # ---------------------------------
-            # WAVE METRICS
-            # ---------------------------------
+            bullish = int((waves["Direction"] == "BULLISH").sum())
+            bearish = int((waves["Direction"] == "BEARISH").sum())
 
             m1, m2, m3 = st.columns(3)
+            m1.metric("Total Waves", len(waves))
+            m2.metric("Bullish Waves", bullish)
+            m3.metric("Bearish Waves", bearish)
 
-            m1.metric(
-                "Total Waves",
-                len(waves)
-            )
-
-            m2.metric(
-                "Bullish Waves",
-                bullish_count
-            )
-
-            m3.metric(
-                "Bearish Waves",
-                bearish_count
-            )
-
-            # ---------------------------------
-            # SWING STRUCTURE TABLE
-            # ---------------------------------
-
+            # STATIC TABLES - avoids interactive DataFrame component
             st.subheader("Swing Structure")
 
             structure_data = pd.DataFrame([
-
                 {
-                    "Time": data["date"].iloc[
-                        point["index"]
-                    ],
-
-                    "Swing Type": point["type"],
-
-                    "Price": round(
-                        point["price"], 5
-                    ),
-
-                    "Classification": point["structure"]
+                    "Time": data["date"].iloc[p["index"]],
+                    "Swing Type": p["type"],
+                    "Price": round(p["price"], 5),
+                    "Classification": p["structure"]
                 }
-
-                for point in swings
-
+                for p in swings
             ])
 
-            st.dataframe(
-                structure_data.tail(30),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # ---------------------------------
-            # WAVE PERFORMANCE TABLE
-            # ---------------------------------
+            st.table(structure_data.tail(30))
 
             st.subheader("Wave Performance Table")
+            st.table(waves.tail(30))
 
-            st.dataframe(
-                waves.tail(30),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # ---------------------------------
             # ECG WAVE MONITOR
-            # ---------------------------------
-
             st.subheader("Market ECG Wave Monitor")
 
             wave_fig = go.Figure()
-
-            wave_fig.add_trace(
-                go.Scatter(
-                    x=[
-                        data["date"].iloc[p["index"]]
-                        for p in swings
-                    ],
-
-                    y=[
-                        p["price"]
-                        for p in swings
-                    ],
-
-                    mode="lines+markers+text",
-
-                    text=[
-                        p["structure"]
-                        for p in swings
-                    ],
-
-                    textposition="top center",
-
-                    line=dict(
-                        color="#00E5A8",
-                        width=2
-                    ),
-
-                    marker=dict(
-                        size=8
-                    ),
-
-                    name="Confirmed Wave Structure"
-                )
-            )
+            wave_fig.add_trace(go.Scatter(
+                x=[data["date"].iloc[p["index"]] for p in swings],
+                y=[p["price"] for p in swings],
+                mode="lines+markers+text",
+                text=[p["structure"] for p in swings],
+                textposition="top center",
+                line=dict(color="#00E5A8", width=2),
+                marker=dict(size=8),
+                name="Confirmed Swings"
+            ))
 
             wave_fig.update_layout(
                 template="plotly_dark",
-                height=450,
+                height=430,
                 xaxis_title="Date",
                 yaxis_title="Price"
             )
 
-            st.plotly_chart(
-                wave_fig,
-                use_container_width=True
-            )
+            st.plotly_chart(wave_fig, use_container_width=True)
 
-            # ---------------------------------
-            # MARKET STRUCTURE OBSERVATION
-            # ---------------------------------
+            # STRUCTURE OBSERVATION
+            st.subheader("Market Structure Observation")
 
-            st.subheader(
-                "Market Structure Observation"
-            )
+            recent = [p["structure"] for p in swings[-6:]]
 
-            recent = [
-                p["structure"]
-                for p in swings[-6:]
-            ]
-
-            has_hh = "HH" in recent
-            has_hl = "HL" in recent
-
-            has_lh = "LH" in recent
-            has_ll = "LL" in recent
-
-            if has_hh and has_hl:
-
-                st.success(
-                    "Higher High and Higher Low "
-                    "structures detected. "
-                    "Bullish structure is present "
-                    "in the recent confirmed swings."
-                )
-
-            elif has_lh and has_ll:
-
-                st.warning(
-                    "Lower High and Lower Low "
-                    "structures detected. "
-                    "Bearish structure is present "
-                    "in the recent confirmed swings."
-                )
-
+            if "HH" in recent and "HL" in recent:
+                st.success("Higher High and Higher Low structures detected. Bullish structure is present in recent confirmed swings.")
+            elif "LH" in recent and "LL" in recent:
+                st.warning("Lower High and Lower Low structures detected. Bearish structure is present in recent confirmed swings.")
             else:
-
-                st.info(
-                    "Mixed or developing structure. "
-                    "Wait for additional confirmed swings."
-                )
+                st.info("Mixed or developing structure. Wait for additional confirmed swings.")
 
             st.caption(
-                "Structure observation only. "
-                "This is not a trading signal or "
-                "a prediction of the next market move."
+                "Historical structure observation only. "
+                "Not a trading signal or a forecast."
             )
 
         else:
-
-            st.warning(
-                "Insufficient confirmed swings. "
-                "Upload more historical candles."
-            )
-
-        # ---------------------------------
-        # DATA PREVIEW
-        # ---------------------------------
+            st.warning("Insufficient confirmed swings. Upload more historical candles.")
 
         with st.expander("View Uploaded Historical Data"):
-
-            st.dataframe(
-                data.tail(50),
-                use_container_width=True,
-                hide_index=True
-            )
+            st.table(data.tail(20))
 
     except Exception as e:
-
-        st.error(
-            f"Market Radar Error: {e}"
-        )
-
-        st.info(
-            "Please check your CSV columns and data format."
-        )
-
-
-# -----------------------------------------
-# FOOTER
-# -----------------------------------------
+        st.error(f"Market Radar Error: {e}")
+        st.info("Please check the CSV columns and data format.")
 
 st.divider()
-
-st.caption(
-    "TRADING STAR | MARKET RADAR | RESEARCH V1.2"
-)
+st.caption("TRADING STAR | MARKET RADAR | RESEARCH V1.3")
