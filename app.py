@@ -222,9 +222,37 @@ if uploaded_file is not None:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Wave Research
-        st.subheader("Historical Wave Analysis")
+        
+        # ADVANCED WAVE STRUCTURE INTELLIGENCE
 
+        st.subheader("Advanced Wave Intelligence")
+
+        # Classify swing highs and lows
+        previous_high = None
+        previous_low = None
+
+        for point in swings:
+            if point["type"] == "HIGH":
+                if previous_high is None:
+                    point["structure"] = "INITIAL HIGH"
+                elif point["price"] > previous_high:
+                    point["structure"] = "HH"
+                else:
+                    point["structure"] = "LH"
+
+                previous_high = point["price"]
+
+            else:
+                if previous_low is None:
+                    point["structure"] = "INITIAL LOW"
+                elif point["price"] > previous_low:
+                    point["structure"] = "HL"
+                else:
+                    point["structure"] = "LL"
+
+                previous_low = point["price"]
+
+        # Build wave research table
         wave_rows = []
 
         for j in range(1, len(swings)):
@@ -232,20 +260,80 @@ if uploaded_file is not None:
             b = swings[j]
 
             difference = b["price"] - a["price"]
+            duration = b["index"] - a["index"]
+
+            atr_value = data["ATR"].iloc[b["index"]]
+
+            atr_multiple = (
+                abs(difference) / atr_value
+                if pd.notna(atr_value) and atr_value > 0
+                else np.nan
+            )
+
+            velocity = (
+                abs(difference) / duration
+                if duration > 0 else np.nan
+            )
 
             wave_rows.append({
                 "Wave": j,
                 "Direction": (
                     "BULLISH" if difference > 0 else "BEARISH"
                 ),
-                "Start": round(a["price"], 5),
-                "End": round(b["price"], 5),
+                "Structure": (
+                    a["structure"] + " → " + b["structure"]
+                ),
+                "Start Price": round(a["price"], 5),
+                "End Price": round(b["price"], 5),
                 "Movement": round(abs(difference), 5),
-                "Candles": b["index"] - a["index"]
+                "Movement %": round(
+                    abs(difference) / a["price"] * 100, 3
+                ),
+                "Duration": duration,
+                "Velocity": round(velocity, 5),
+                "ATR Multiple": (
+                    round(atr_multiple, 2)
+                    if pd.notna(atr_multiple) else None
+                )
             })
 
         if wave_rows:
+
             waves = pd.DataFrame(wave_rows)
+
+            bullish_count = (
+                waves["Direction"] == "BULLISH"
+            ).sum()
+
+            bearish_count = (
+                waves["Direction"] == "BEARISH"
+            ).sum()
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric("Total Waves", len(waves))
+            c2.metric("Bullish Waves", int(bullish_count))
+            c3.metric("Bearish Waves", int(bearish_count))
+
+            st.markdown("### Swing Structure")
+
+            structure_data = pd.DataFrame([
+                {
+                    "Time": data["Date"].iloc[p["index"]],
+                    "Swing Type": p["type"],
+                    "Price": round(p["price"], 5),
+                    "Classification": p["structure"]
+                }
+                for p in swings
+            ])
+
+            st.dataframe(
+                structure_data.tail(30),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.markdown("### Wave Performance Table")
 
             st.dataframe(
                 waves.tail(30),
@@ -253,22 +341,26 @@ if uploaded_file is not None:
                 hide_index=True
             )
 
-            st.subheader("Wave ECG Monitor")
+            # ECG-style wave graph
+            st.markdown("### Market ECG Wave Monitor")
 
             wave_fig = go.Figure()
 
             wave_fig.add_trace(go.Scatter(
-                x=list(range(len(swings))),
+                x=[p["index"] for p in swings],
                 y=[p["price"] for p in swings],
-                mode="lines+markers",
+                mode="lines+markers+text",
+                text=[p["structure"] for p in swings],
+                textposition="top center",
                 line=dict(color="#00E5A8", width=2),
-                name="Market Wave"
+                marker=dict(size=8),
+                name="Confirmed Wave Structure"
             ))
 
             wave_fig.update_layout(
                 template="plotly_dark",
-                height=300,
-                xaxis_title="Wave Sequence",
+                height=400,
+                xaxis_title="Candle Index",
                 yaxis_title="Price"
             )
 
@@ -277,25 +369,32 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
-            st.metric("Detected Waves", len(waves))
+            # Basic structural observation
+            recent = [p["structure"] for p in swings[-6:]]
+
+            st.markdown("### Market Structure Observation")
+
+            if recent.count("HH") >= 1 and recent.count("HL") >= 1:
+                st.success(
+                    "Higher High / Higher Low structures detected. "
+                    "Review bullish structure."
+                )
+
+            elif recent.count("LH") >= 1 and recent.count("LL") >= 1:
+                st.warning(
+                    "Lower High / Lower Low structures detected. "
+                    "Review bearish structure."
+                )
+
+            else:
+                st.info(
+                    "Mixed or developing structure. "
+                    "Wait for additional confirmed swings."
+                )
 
         else:
-            st.warning("No confirmed wave sequence detected.")
+            st.warning("Insufficient confirmed waves for analysis.")
 
-        st.info(
-            "Research note: The latest right-side candles are "
-            "not confirmed pivots. This is a historical structure "
-            "prototype, not a future direction prediction."
-        )
-
-    except Exception as e:
-        st.error(f"Data processing error: {e}")
-
-else:
-    st.info(
-        "Upload a historical OHLCV CSV file to begin "
-        "Wave Detection Research."
-    )
 
 st.divider()
 st.caption("TRADING STAR | MARKET RADAR | RESEARCH V1.1")
